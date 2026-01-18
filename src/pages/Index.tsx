@@ -1,184 +1,169 @@
 import { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useToast } from '@/hooks/use-toast';
 import Icon from '@/components/ui/icon';
+import { WebRTCCall } from '@/lib/webrtc';
 
 interface User {
   id: number;
-  name: string;
+  username: string;
   phone: string;
-  peer_id: string;
-  status: 'online' | 'offline' | 'busy' | 'in_call';
+  role: string;
+  status: 'online' | 'offline' | 'busy';
 }
 
-interface CallState {
-  isInCall: boolean;
-  isCalling: boolean;
-  isReceivingCall: boolean;
-  remotePeerId: string | null;
-  remoteUserName: string | null;
-  callStartTime: number | null;
+interface CallLog {
+  id: number;
+  caller_id: number;
+  receiver_id: number;
+  caller_phone: string;
+  receiver_phone: string;
+  duration: number;
+  started_at: string;
+  ended_at: string | null;
+  status: 'completed' | 'missed' | 'active';
 }
-
-const API_BASE = 'https://functions.poehali.dev/cf10f403-5f90-48c4-9bcd-4f8eb9aea79f';
 
 export default function Index() {
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [users, setUsers] = useState<User[]>([]);
-  const [loginName, setLoginName] = useState('');
-  const [loginPhone, setLoginPhone] = useState('');
-  const [showLogin, setShowLogin] = useState(true);
-  const [isMuted, setIsMuted] = useState(false);
-  const [callDuration, setCallDuration] = useState(0);
+  const [callLogs, setCallLogs] = useState<CallLog[]>([]);
   
-  const [callState, setCallState] = useState<CallState>({
-    isInCall: false,
-    isCalling: false,
-    isReceivingCall: false,
-    remotePeerId: null,
-    remoteUserName: null,
-    callStartTime: null,
-  });
-
-  const { toast } = useToast();
-  const localStreamRef = useRef<MediaStream | null>(null);
+  const [inCall, setInCall] = useState(false);
+  const [callDuration, setCallDuration] = useState(0);
+  const [callingUser, setCallingUser] = useState<User | null>(null);
+  const [isMuted, setIsMuted] = useState(false);
+  
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
-  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const webrtcCallRef = useRef<WebRTCCall | null>(null);
+  const callTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    if (callState.isInCall && callState.callStartTime) {
-      const interval = setInterval(() => {
-        setCallDuration(Math.floor((Date.now() - callState.callStartTime!) / 1000));
-      }, 1000);
-      return () => clearInterval(interval);
+    const userStr = localStorage.getItem('voip_user');
+    if (!userStr) {
+      navigate('/login');
+      return;
     }
-  }, [callState.isInCall, callState.callStartTime]);
+    
+    const user = JSON.parse(userStr);
+    setCurrentUser(user);
+    loadUsers();
+    loadCallLogs();
+
+    const interval = setInterval(() => {
+      loadUsers();
+      loadCallLogs();
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [navigate]);
+
+  useEffect(() => {
+    if (inCall && callTimerRef.current === null) {
+      callTimerRef.current = setInterval(() => {
+        setCallDuration(prev => prev + 1);
+      }, 1000);
+    } else if (!inCall && callTimerRef.current) {
+      clearInterval(callTimerRef.current);
+      callTimerRef.current = null;
+      setCallDuration(0);
+    }
+
+    return () => {
+      if (callTimerRef.current) {
+        clearInterval(callTimerRef.current);
+      }
+    };
+  }, [inCall]);
 
   const loadUsers = async () => {
     try {
-      const response = await fetch(`${API_BASE}/?action=list`);
+      const response = await fetch('https://functions.poehali.dev/a8f30b33-3fc0-41e9-9521-78bb1cb2cab3');
       const data = await response.json();
-      if (data.users) {
-        setUsers(data.users.filter((u: User) => u.id !== currentUser?.id));
-      }
+      setUsers(data.users || []);
     } catch (error) {
-      console.error('Ошибка загрузки пользователей:', error);
+      console.error('Failed to load users:', error);
     }
   };
 
-  const handleLogin = async () => {
-    if (!loginName.trim()) {
-      toast({ title: 'Ошибка', description: 'Введите ваше имя', variant: 'destructive' });
-      return;
+  const loadCallLogs = async () => {
+    try {
+      const response = await fetch('https://functions.poehali.dev/46bdfd79-a9fb-4730-9257-eeba1e141fb5');
+      const data = await response.json();
+      setCallLogs(data.calls || []);
+    } catch (error) {
+      console.error('Failed to load call logs:', error);
     }
+  };
+
+  const startCall = async (receiver: User) => {
+    if (!currentUser) return;
 
     try {
-      const response = await fetch(`${API_BASE}/?action=register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: loginName, phone: loginPhone }),
-      });
-      const data = await response.json();
+      setCallingUser(receiver);
       
-      if (data.user) {
-        setCurrentUser(data.user);
-        setShowLogin(false);
-        loadUsers();
-        toast({ title: 'Подключено', description: `Добро пожаловать, ${loginName}!` });
-      }
+      webrtcCallRef.current = new WebRTCCall(
+        (stream) => {
+          if (remoteAudioRef.current) {
+            remoteAudioRef.current.srcObject = stream;
+          }
+        },
+        () => {
+          setInCall(false);
+          setCallingUser(null);
+          toast({ title: 'Звонок завершён' });
+        }
+      );
+
+      await webrtcCallRef.current.startCall(receiver.id, currentUser.id);
+      setInCall(true);
+      
+      toast({
+        title: 'Звонок начат',
+        description: `Звоним ${receiver.username}...`
+      });
     } catch (error) {
-      toast({ title: 'Ошибка', description: 'Не удалось подключиться', variant: 'destructive' });
+      toast({
+        title: 'Ошибка',
+        description: 'Не удалось начать звонок',
+        variant: 'destructive'
+      });
+      setCallingUser(null);
     }
   };
 
-  const createPeerConnection = async () => {
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-      ],
-    });
-
-    pc.ontrack = (event) => {
-      if (remoteAudioRef.current) {
-        remoteAudioRef.current.srcObject = event.streams[0];
-      }
-    };
-
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    localStreamRef.current = stream;
-    stream.getTracks().forEach(track => pc.addTrack(track, stream));
-
-    peerConnectionRef.current = pc;
-    return pc;
-  };
-
-  const startCall = async (targetUser: User) => {
-    try {
-      setCallState({
-        isInCall: false,
-        isCalling: true,
-        isReceivingCall: false,
-        remotePeerId: targetUser.peer_id,
-        remoteUserName: targetUser.name,
-        callStartTime: null,
-      });
-
-      await createPeerConnection();
-      
-      toast({ title: 'Вызов', description: `Звоним ${targetUser.name}...` });
-      
-      setTimeout(() => {
-        setCallState(prev => ({
-          ...prev,
-          isInCall: true,
-          isCalling: false,
-          callStartTime: Date.now(),
-        }));
-        toast({ title: 'Звонок принят', description: `Разговор с ${targetUser.name}` });
-      }, 2000);
-    } catch (error) {
-      toast({ title: 'Ошибка', description: 'Не удалось начать звонок', variant: 'destructive' });
-      endCall();
+  const endCall = async () => {
+    if (webrtcCallRef.current) {
+      await webrtcCallRef.current.endCall();
     }
+    setInCall(false);
+    setCallingUser(null);
   };
 
   const toggleMute = () => {
-    if (localStreamRef.current) {
-      localStreamRef.current.getAudioTracks().forEach(track => {
-        track.enabled = !track.enabled;
-      });
-      setIsMuted(!isMuted);
+    if (webrtcCallRef.current) {
+      const stream = webrtcCallRef.current.getLocalStream();
+      if (stream) {
+        stream.getAudioTracks().forEach(track => {
+          track.enabled = isMuted;
+        });
+        setIsMuted(!isMuted);
+      }
     }
   };
 
-  const endCall = () => {
-    if (peerConnectionRef.current) {
-      peerConnectionRef.current.close();
-      peerConnectionRef.current = null;
-    }
-
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(track => track.stop());
-      localStreamRef.current = null;
-    }
-
-    setCallState({
-      isInCall: false,
-      isCalling: false,
-      isReceivingCall: false,
-      remotePeerId: null,
-      remoteUserName: null,
-      callStartTime: null,
-    });
-    setIsMuted(false);
-    setCallDuration(0);
-    
-    toast({ title: 'Звонок завершён' });
+  const logout = () => {
+    localStorage.removeItem('voip_user');
+    localStorage.removeItem('voip_token');
+    navigate('/login');
   };
 
   const formatDuration = (seconds: number) => {
@@ -191,60 +176,20 @@ export default function Index() {
     switch (status) {
       case 'online': return 'bg-green-500';
       case 'busy': return 'bg-yellow-500';
-      case 'in_call': return 'bg-red-500';
       case 'offline': return 'bg-gray-500';
     }
   };
 
-  useEffect(() => {
-    if (currentUser) {
-      loadUsers();
-      const interval = setInterval(loadUsers, 3000);
-      return () => clearInterval(interval);
+  const getCallStatusBadge = (status: CallLog['status']) => {
+    switch (status) {
+      case 'completed': return <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Завершён</Badge>;
+      case 'missed': return <Badge className="bg-red-500/20 text-red-400 border-red-500/30">Пропущен</Badge>;
+      case 'active': return <Badge className="bg-blue-500/20 text-blue-400 border-blue-500/30 animate-pulse">Активен</Badge>;
     }
-  }, [currentUser]);
+  };
 
-  if (showLogin) {
-    return (
-      <div className="min-h-screen bg-background flex items-center justify-center p-6">
-        <Card className="w-full max-w-md p-8 border-border">
-          <div className="text-center mb-8">
-            <div className="w-16 h-16 gradient-primary rounded-2xl flex items-center justify-center mx-auto mb-4 animate-scale-in">
-              <Icon name="Phone" size={32} className="text-white" />
-            </div>
-            <h1 className="text-3xl font-bold mb-2 animate-fade-in">VoIP Network</h1>
-            <p className="text-muted-foreground animate-fade-in">Войдите для начала звонков</p>
-          </div>
-
-          <div className="space-y-4">
-            <div>
-              <Label>Ваше имя</Label>
-              <Input
-                placeholder="Иван Иванов"
-                value={loginName}
-                onChange={(e) => setLoginName(e.target.value)}
-                className="mt-1.5"
-                onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
-              />
-            </div>
-            <div>
-              <Label>Номер телефона (опционально)</Label>
-              <Input
-                placeholder="+7 (___) ___-__-__"
-                value={loginPhone}
-                onChange={(e) => setLoginPhone(e.target.value)}
-                className="mt-1.5"
-                onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
-              />
-            </div>
-            <Button onClick={handleLogin} className="w-full gradient-primary">
-              <Icon name="LogIn" size={18} className="mr-2" />
-              Войти в сеть
-            </Button>
-          </div>
-        </Card>
-      </div>
-    );
+  if (!currentUser) {
+    return null;
   }
 
   return (
@@ -259,119 +204,206 @@ export default function Index() {
                 <Icon name="Phone" size={24} className="text-white" />
               </div>
               <div>
-                <h1 className="text-xl font-bold">VoIP Network</h1>
-                <p className="text-sm text-muted-foreground">{currentUser?.name}</p>
+                <h1 className="text-2xl font-bold">VoIP Control</h1>
+                <p className="text-sm text-muted-foreground">Привет, {currentUser.username}</p>
               </div>
             </div>
-            <Badge className="gradient-primary text-white border-0 px-3 py-1">
-              <div className="w-2 h-2 bg-green-400 rounded-full mr-2 animate-pulse" />
-              Онлайн
-            </Badge>
+            <div className="flex items-center gap-4">
+              <Badge className="gradient-primary text-white border-0 px-3 py-1">
+                <Icon name="Shield" size={14} className="mr-1" />
+                Шифрование активно
+              </Badge>
+              <Button size="sm" variant="outline" onClick={logout}>
+                <Icon name="LogOut" size={16} className="mr-2" />
+                Выход
+              </Button>
+            </div>
           </div>
         </div>
       </header>
 
       <main className="container mx-auto px-6 py-8">
-        {(callState.isInCall || callState.isCalling || callState.isReceivingCall) && (
-          <Card className="mb-8 p-8 border-2 border-primary bg-card/50 backdrop-blur animate-scale-in">
-            <div className="text-center">
-              <div className="w-24 h-24 mx-auto mb-4 rounded-full bg-gradient-to-br from-primary to-secondary flex items-center justify-center animate-pulse-slow">
-                <Icon 
-                  name={callState.isInCall ? "Phone" : callState.isReceivingCall ? "PhoneIncoming" : "PhoneOutgoing"} 
-                  size={48} 
-                  className="text-white" 
-                />
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+          <Card className="p-6 bg-card border-border relative overflow-hidden group hover:border-primary/50 transition-all duration-300">
+            <div className="absolute inset-0 gradient-primary opacity-5 group-hover:opacity-10 transition-opacity" />
+            <div className="relative">
+              <div className="flex items-center justify-between mb-2">
+                <Icon name="Users" size={24} className="text-primary" />
+                <Badge variant="secondary">{users.filter(u => u.status === 'online').length}/{users.length}</Badge>
               </div>
-              
-              <h2 className="text-2xl font-bold mb-2">{callState.remoteUserName}</h2>
-              
-              {callState.isInCall && (
-                <p className="text-3xl font-mono text-primary mb-6">{formatDuration(callDuration)}</p>
-              )}
-              
-              {callState.isCalling && (
-                <p className="text-muted-foreground mb-6 animate-pulse">Вызов...</p>
-              )}
-
-              <div className="flex items-center justify-center gap-4">
-                {(callState.isInCall || callState.isCalling) && (
-                  <>
-                    <Button 
-                      onClick={toggleMute} 
-                      size="lg" 
-                      variant={isMuted ? "destructive" : "outline"}
-                      className="hover-scale"
-                    >
-                      <Icon name={isMuted ? "MicOff" : "Mic"} size={20} className="mr-2" />
-                      {isMuted ? 'Включить' : 'Выключить'} микрофон
-                    </Button>
-                    <Button onClick={endCall} size="lg" variant="destructive" className="hover-scale">
-                      <Icon name="PhoneOff" size={20} className="mr-2" />
-                      Завершить
-                    </Button>
-                  </>
-                )}
-              </div>
+              <p className="text-sm text-muted-foreground mb-1">Онлайн</p>
+              <p className="text-2xl font-bold">{users.filter(u => u.status === 'online').length}</p>
             </div>
           </Card>
-        )}
 
-        <Card className="border-border animate-fade-in">
-          <div className="p-6 border-b border-border flex items-center justify-between">
-            <div>
-              <h2 className="text-xl font-bold mb-1">Активные пользователи</h2>
-              <p className="text-sm text-muted-foreground">Нажмите "Позвонить" для начала звонка</p>
-            </div>
-            <Badge variant="secondary" className="px-3 py-1">
-              <Icon name="Users" size={14} className="mr-1" />
-              {users.length} онлайн
-            </Badge>
-          </div>
-          
-          <div className="divide-y divide-border">
-            {users.length === 0 && (
-              <div className="p-12 text-center text-muted-foreground">
-                <Icon name="Users" size={48} className="mx-auto mb-4 opacity-30" />
-                <p>Нет других пользователей онлайн</p>
-                <p className="text-sm mt-2">Откройте сайт в новой вкладке и войдите под другим именем</p>
+          <Card className="p-6 bg-card border-border relative overflow-hidden group hover:border-secondary/50 transition-all duration-300">
+            <div className="absolute inset-0 gradient-accent opacity-5 group-hover:opacity-10 transition-opacity" />
+            <div className="relative">
+              <div className="flex items-center justify-between mb-2">
+                <Icon name="Phone" size={24} className="text-secondary" />
               </div>
-            )}
-            
-            {users.map((user) => (
-              <div key={user.id} className="p-6 hover:bg-muted/30 transition-colors">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-4">
-                    <div className="relative">
-                      <div className="w-12 h-12 rounded-full bg-gradient-to-br from-primary to-secondary flex items-center justify-center text-white font-semibold text-lg">
-                        {user.name.charAt(0)}
+              <p className="text-sm text-muted-foreground mb-1">Звонков сегодня</p>
+              <p className="text-2xl font-bold">{callLogs.length}</p>
+            </div>
+          </Card>
+
+          <Card className="p-6 bg-card border-border relative overflow-hidden group hover:border-accent/50 transition-all duration-300">
+            <div className="absolute inset-0 bg-accent opacity-5 group-hover:opacity-10 transition-opacity" />
+            <div className="relative">
+              <div className="flex items-center justify-between mb-2">
+                <Icon name="User" size={24} className="text-accent" />
+              </div>
+              <p className="text-sm text-muted-foreground mb-1">Ваш номер</p>
+              <p className="text-lg font-bold">{currentUser.phone}</p>
+            </div>
+          </Card>
+
+          <Card className="p-6 bg-card border-border relative overflow-hidden group hover:border-primary/50 transition-all duration-300">
+            <div className="absolute inset-0 gradient-primary opacity-5 group-hover:opacity-10 transition-opacity" />
+            <div className="relative">
+              <div className="flex items-center justify-between mb-2">
+                <Icon name="Shield" size={24} className="text-primary" />
+                <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse-slow" />
+              </div>
+              <p className="text-sm text-muted-foreground mb-1">Статус</p>
+              <p className="text-2xl font-bold">Online</p>
+            </div>
+          </Card>
+        </div>
+
+        <Tabs defaultValue="users" className="space-y-6">
+          <TabsList className="bg-card border border-border">
+            <TabsTrigger value="users" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
+              <Icon name="Users" size={16} className="mr-2" />
+              Пользователи
+            </TabsTrigger>
+            <TabsTrigger value="calls" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
+              <Icon name="Phone" size={16} className="mr-2" />
+              Журнал звонков
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="users">
+            <Card className="border-border">
+              <div className="p-6 border-b border-border">
+                <h2 className="text-xl font-bold mb-1">Доступные пользователи</h2>
+                <p className="text-sm text-muted-foreground">Нажмите на пользователя чтобы позвонить</p>
+              </div>
+              <div className="divide-y divide-border">
+                {users.filter(u => u.id !== currentUser.id).map((user) => (
+                  <div key={user.id} className="p-6 hover:bg-muted/30 transition-colors">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-4">
+                        <div className="relative">
+                          <div className="w-12 h-12 rounded-full bg-gradient-to-br from-primary to-secondary flex items-center justify-center text-white font-semibold">
+                            {user.username.charAt(0)}
+                          </div>
+                          <div className={`absolute bottom-0 right-0 w-4 h-4 ${getStatusColor(user.status)} rounded-full border-2 border-card`} />
+                        </div>
+                        <div>
+                          <p className="font-semibold">{user.username}</p>
+                          <p className="text-sm text-muted-foreground flex items-center gap-2">
+                            <Icon name="Phone" size={14} />
+                            {user.phone}
+                          </p>
+                        </div>
                       </div>
-                      <div className={`absolute bottom-0 right-0 w-4 h-4 ${getStatusColor(user.status)} rounded-full border-2 border-card animate-pulse`} />
-                    </div>
-                    <div>
-                      <p className="font-semibold text-lg">{user.name}</p>
-                      {user.phone && (
-                        <p className="text-sm text-muted-foreground flex items-center gap-2">
-                          <Icon name="Phone" size={14} />
-                          {user.phone}
-                        </p>
-                      )}
+                      <Button 
+                        className="gradient-primary"
+                        onClick={() => startCall(user)}
+                        disabled={inCall || user.status !== 'online'}
+                      >
+                        <Icon name="Phone" size={16} className="mr-2" />
+                        Позвонить
+                      </Button>
                     </div>
                   </div>
-                  
-                  <Button 
-                    onClick={() => startCall(user)}
-                    disabled={user.status === 'in_call' || callState.isInCall || callState.isCalling || callState.isReceivingCall}
-                    className="gradient-primary hover-scale"
-                  >
-                    <Icon name="Phone" size={16} className="mr-2" />
-                    Позвонить
-                  </Button>
-                </div>
+                ))}
               </div>
-            ))}
-          </div>
-        </Card>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="calls">
+            <Card className="border-border">
+              <div className="p-6 border-b border-border">
+                <h2 className="text-xl font-bold mb-1">Журнал звонков</h2>
+                <p className="text-sm text-muted-foreground">История всех звонков в системе</p>
+              </div>
+              <div className="divide-y divide-border">
+                {callLogs.map((call) => (
+                  <div key={call.id} className="p-6 hover:bg-muted/30 transition-colors">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-6 flex-1">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
+                            <Icon name="PhoneOutgoing" size={18} className="text-primary" />
+                          </div>
+                          <div>
+                            <p className="font-medium mb-1">{call.caller_phone}</p>
+                            <p className="text-sm text-muted-foreground flex items-center gap-1">
+                              <Icon name="ArrowRight" size={14} />
+                              {call.receiver_phone}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-6">
+                          <div>
+                            <p className="text-sm text-muted-foreground mb-1">Длительность</p>
+                            <p className="font-semibold">{formatDuration(call.duration)}</p>
+                          </div>
+                          <div>
+                            <p className="text-sm text-muted-foreground mb-1">Время</p>
+                            <p className="font-semibold">{new Date(call.started_at).toLocaleString('ru-RU')}</p>
+                          </div>
+                        </div>
+                      </div>
+                      {getCallStatusBadge(call.status)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          </TabsContent>
+        </Tabs>
       </main>
+
+      <Dialog open={inCall} onOpenChange={(open) => !open && endCall()}>
+        <DialogContent className="bg-card border-border">
+          <DialogHeader>
+            <DialogTitle className="text-center text-2xl">
+              {callingUser ? `Звонок с ${callingUser.username}` : 'Активный звонок'}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="py-8 space-y-6">
+            <div className="text-center">
+              <div className="w-24 h-24 rounded-full bg-gradient-to-br from-primary to-secondary flex items-center justify-center text-white font-bold text-4xl mx-auto mb-4">
+                {callingUser?.username.charAt(0) || '?'}
+              </div>
+              <p className="text-3xl font-bold mb-2">{formatDuration(callDuration)}</p>
+              <p className="text-muted-foreground">{callingUser?.phone}</p>
+            </div>
+            
+            <div className="flex items-center justify-center gap-4">
+              <Button
+                size="lg"
+                variant={isMuted ? 'default' : 'outline'}
+                className="rounded-full w-16 h-16"
+                onClick={toggleMute}
+              >
+                <Icon name={isMuted ? 'MicOff' : 'Mic'} size={24} />
+              </Button>
+              
+              <Button
+                size="lg"
+                className="rounded-full w-20 h-20 bg-destructive hover:bg-destructive/90"
+                onClick={endCall}
+              >
+                <Icon name="PhoneOff" size={32} />
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

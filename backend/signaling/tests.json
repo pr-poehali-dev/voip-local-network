@@ -3,7 +3,7 @@
     {
       "name": "Get call logs",
       "method": "GET",
-      "path": "/calls",
+      "path": "/",
       "expectedStatus": 200,
       "expectedBody": {
         "calls": "array"

@@ -22,7 +22,7 @@
     {
       "name": "Get users list",
       "method": "GET",
-      "path": "/users",
+      "path": "/",
       "expectedStatus": 200,
       "expectedBody": {
         "users": "array"

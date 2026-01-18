@@ -33,9 +33,9 @@ def handler(event: dict, context) -> dict:
         conn = psycopg2.connect(dsn)
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        path = event.get('params', {}).get('path', '')
+        path = event.get('url', '/').strip()
         
-        if method == 'POST' and path == '/initiate':
+        if method == 'POST' and 'initiate' in path:
             body = json.loads(event.get('body', '{}'))
             caller_id = body.get('caller_id')
             receiver_id = body.get('receiver_id')
@@ -83,7 +83,7 @@ def handler(event: dict, context) -> dict:
                 'isBase64Encoded': False
             }
         
-        elif method == 'POST' and path == '/answer':
+        elif method == 'POST' and 'answer' in path:
             body = json.loads(event.get('body', '{}'))
             call_id = body.get('call_id')
             answer = body.get('answer')
@@ -113,7 +113,7 @@ def handler(event: dict, context) -> dict:
                 'isBase64Encoded': False
             }
         
-        elif method == 'POST' and path == '/end':
+        elif method == 'POST' and 'end' in path:
             body = json.loads(event.get('body', '{}'))
             call_id = body.get('call_id')
             
@@ -141,7 +141,7 @@ def handler(event: dict, context) -> dict:
                 'isBase64Encoded': False
             }
         
-        elif method == 'POST' and path == '/ice':
+        elif method == 'POST' and 'ice' in path:
             body = json.loads(event.get('body', '{}'))
             candidate = body.get('candidate')
             call_id = body.get('call_id')
@@ -164,7 +164,7 @@ def handler(event: dict, context) -> dict:
                 'isBase64Encoded': False
             }
         
-        elif method == 'GET' and path == '/calls':
+        elif method == 'GET':
             query = event.get('queryStringParameters', {})
             user_id = query.get('user_id')
             

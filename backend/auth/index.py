@@ -34,9 +34,9 @@ def handler(event: dict, context) -> dict:
         conn = psycopg2.connect(dsn)
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        path = event.get('params', {}).get('path', '')
+        path = event.get('url', '/').strip()
         
-        if method == 'POST' and path == '/register':
+        if method == 'POST' and 'register' in path:
             body = json.loads(event.get('body', '{}'))
             username = body.get('username', '').strip()
             phone = body.get('phone', '').strip()
@@ -80,7 +80,7 @@ def handler(event: dict, context) -> dict:
                 'isBase64Encoded': False
             }
         
-        elif method == 'POST' and path == '/login':
+        elif method == 'POST' and 'login' in path:
             body = json.loads(event.get('body', '{}'))
             phone = body.get('phone', '').strip()
             password = body.get('password', '')
@@ -120,7 +120,7 @@ def handler(event: dict, context) -> dict:
                 'isBase64Encoded': False
             }
         
-        elif method == 'GET' and path == '/users':
+        elif method == 'GET':
             cur.execute("SELECT id, username, phone, role, status, last_seen FROM users ORDER BY last_seen DESC")
             users = cur.fetchall()
             
@@ -134,7 +134,7 @@ def handler(event: dict, context) -> dict:
                 'isBase64Encoded': False
             }
         
-        elif method == 'PUT' and path == '/status':
+        elif method == 'PUT' and 'status' in path:
             body = json.loads(event.get('body', '{}'))
             user_id = body.get('user_id')
             status = body.get('status', 'offline')
