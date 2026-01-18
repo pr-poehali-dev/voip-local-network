@@ -1,0 +1,14 @@
+{
+  "tests": [
+    {
+      "name": "Get call logs",
+      "method": "GET",
+      "path": "/calls",
+      "expectedStatus": 200,
+      "expectedBody": {
+        "calls": "array"
+      },
+      "bodyMatcher": "partial"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "tests": [
+    {
+      "name": "Register new user",
+      "method": "POST",
+      "path": "/?action=register",
+      "body": {
+        "name": "Test User",
+        "phone": "+7 (999) 999-99-99"
+      },
+      "expectedStatus": 200,
+      "expectedBody": {
+        "user": {
+          "name": "string",
+          "peer_id": "string",
+          "status": "online"
+        }
+      },
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "List online users",
+      "method": "GET",
+      "path": "/?action=list",
+      "expectedStatus": 200,
+      "expectedBody": {
+        "users": "array"
+      },
+      "bodyMatcher": "partial"
+    }
+  ]
+}

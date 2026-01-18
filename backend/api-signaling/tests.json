@@ -1,0 +1,11 @@
+{
+  "tests": [
+    {
+      "name": "WebSocket connection endpoint",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    }
+  ]
+}

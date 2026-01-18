@@ -1,0 +1,6 @@
+{
+  "auth": "https://functions.poehali.dev/a8f30b33-3fc0-41e9-9521-78bb1cb2cab3",
+  "signaling": "https://functions.poehali.dev/46bdfd79-a9fb-4730-9257-eeba1e141fb5",
+  "api-users": "https://functions.poehali.dev/cf10f403-5f90-48c4-9bcd-4f8eb9aea79f",
+  "api-signaling": "https://functions.poehali.dev/4399d0c7-c93b-4ddc-8cf3-087e5be406c4"
+}

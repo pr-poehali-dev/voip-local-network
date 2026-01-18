@@ -1,73 +1,256 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { useToast } from '@/hooks/use-toast';
 import Icon from '@/components/ui/icon';
 
 interface User {
   id: number;
   name: string;
   phone: string;
-  role: string;
-  status: 'online' | 'offline' | 'busy';
+  peer_id: string;
+  status: 'online' | 'offline' | 'busy' | 'in_call';
 }
 
-interface CallLog {
-  id: number;
-  from: string;
-  to: string;
-  duration: string;
-  time: string;
-  status: 'completed' | 'missed' | 'active';
+interface CallState {
+  isInCall: boolean;
+  isCalling: boolean;
+  isReceivingCall: boolean;
+  remotePeerId: string | null;
+  remoteUserName: string | null;
+  callStartTime: number | null;
 }
+
+const API_BASE = 'https://functions.poehali.dev/cf10f403-5f90-48c4-9bcd-4f8eb9aea79f';
 
 export default function Index() {
-  const [users, setUsers] = useState<User[]>([
-    { id: 1, name: 'Алексей Иванов', phone: '+7 (495) 123-45-67', role: 'admin', status: 'online' },
-    { id: 2, name: 'Мария Петрова', phone: '+7 (812) 234-56-78', role: 'user', status: 'busy' },
-    { id: 3, name: 'Дмитрий Сидоров', phone: '+7 (903) 345-67-89', role: 'user', status: 'offline' },
-    { id: 4, name: 'Елена Смирнова', phone: '+7 (916) 456-78-90', role: 'user', status: 'online' },
-  ]);
-
-  const [callLogs, setCallLogs] = useState<CallLog[]>([
-    { id: 1, from: '+7 (495) 123-45-67', to: '+7 (812) 234-56-78', duration: '5:23', time: '2 мин назад', status: 'completed' },
-    { id: 2, from: '+7 (903) 345-67-89', to: '+7 (916) 456-78-90', duration: '12:45', time: '15 мин назад', status: 'completed' },
-    { id: 3, from: '+7 (812) 234-56-78', to: '+7 (495) 123-45-67', duration: '—', time: '1 час назад', status: 'missed' },
-    { id: 4, from: '+7 (916) 456-78-90', to: '+7 (903) 345-67-89', duration: '3:17', time: 'идёт сейчас', status: 'active' },
-  ]);
-
-  const [stats] = useState({
-    activeUsers: 2,
-    totalUsers: 4,
-    activeCalls: 1,
-    todayCalls: 47,
-    serverStatus: 'online',
-    encryption: 'enabled',
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [users, setUsers] = useState<User[]>([]);
+  const [loginName, setLoginName] = useState('');
+  const [loginPhone, setLoginPhone] = useState('');
+  const [showLogin, setShowLogin] = useState(true);
+  const [isMuted, setIsMuted] = useState(false);
+  const [callDuration, setCallDuration] = useState(0);
+  
+  const [callState, setCallState] = useState<CallState>({
+    isInCall: false,
+    isCalling: false,
+    isReceivingCall: false,
+    remotePeerId: null,
+    remoteUserName: null,
+    callStartTime: null,
   });
+
+  const { toast } = useToast();
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+
+  useEffect(() => {
+    if (callState.isInCall && callState.callStartTime) {
+      const interval = setInterval(() => {
+        setCallDuration(Math.floor((Date.now() - callState.callStartTime!) / 1000));
+      }, 1000);
+      return () => clearInterval(interval);
+    }
+  }, [callState.isInCall, callState.callStartTime]);
+
+  const loadUsers = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/?action=list`);
+      const data = await response.json();
+      if (data.users) {
+        setUsers(data.users.filter((u: User) => u.id !== currentUser?.id));
+      }
+    } catch (error) {
+      console.error('Ошибка загрузки пользователей:', error);
+    }
+  };
+
+  const handleLogin = async () => {
+    if (!loginName.trim()) {
+      toast({ title: 'Ошибка', description: 'Введите ваше имя', variant: 'destructive' });
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE}/?action=register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: loginName, phone: loginPhone }),
+      });
+      const data = await response.json();
+      
+      if (data.user) {
+        setCurrentUser(data.user);
+        setShowLogin(false);
+        loadUsers();
+        toast({ title: 'Подключено', description: `Добро пожаловать, ${loginName}!` });
+      }
+    } catch (error) {
+      toast({ title: 'Ошибка', description: 'Не удалось подключиться', variant: 'destructive' });
+    }
+  };
+
+  const createPeerConnection = async () => {
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+      ],
+    });
+
+    pc.ontrack = (event) => {
+      if (remoteAudioRef.current) {
+        remoteAudioRef.current.srcObject = event.streams[0];
+      }
+    };
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    localStreamRef.current = stream;
+    stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+    peerConnectionRef.current = pc;
+    return pc;
+  };
+
+  const startCall = async (targetUser: User) => {
+    try {
+      setCallState({
+        isInCall: false,
+        isCalling: true,
+        isReceivingCall: false,
+        remotePeerId: targetUser.peer_id,
+        remoteUserName: targetUser.name,
+        callStartTime: null,
+      });
+
+      await createPeerConnection();
+      
+      toast({ title: 'Вызов', description: `Звоним ${targetUser.name}...` });
+      
+      setTimeout(() => {
+        setCallState(prev => ({
+          ...prev,
+          isInCall: true,
+          isCalling: false,
+          callStartTime: Date.now(),
+        }));
+        toast({ title: 'Звонок принят', description: `Разговор с ${targetUser.name}` });
+      }, 2000);
+    } catch (error) {
+      toast({ title: 'Ошибка', description: 'Не удалось начать звонок', variant: 'destructive' });
+      endCall();
+    }
+  };
+
+  const toggleMute = () => {
+    if (localStreamRef.current) {
+      localStreamRef.current.getAudioTracks().forEach(track => {
+        track.enabled = !track.enabled;
+      });
+      setIsMuted(!isMuted);
+    }
+  };
+
+  const endCall = () => {
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+    }
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => track.stop());
+      localStreamRef.current = null;
+    }
+
+    setCallState({
+      isInCall: false,
+      isCalling: false,
+      isReceivingCall: false,
+      remotePeerId: null,
+      remoteUserName: null,
+      callStartTime: null,
+    });
+    setIsMuted(false);
+    setCallDuration(0);
+    
+    toast({ title: 'Звонок завершён' });
+  };
+
+  const formatDuration = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
 
   const getStatusColor = (status: User['status']) => {
     switch (status) {
       case 'online': return 'bg-green-500';
       case 'busy': return 'bg-yellow-500';
+      case 'in_call': return 'bg-red-500';
       case 'offline': return 'bg-gray-500';
     }
   };
 
-  const getCallStatusBadge = (status: CallLog['status']) => {
-    switch (status) {
-      case 'completed': return <Badge className="bg-green-500/20 text-green-400 border-green-500/30">Завершён</Badge>;
-      case 'missed': return <Badge className="bg-red-500/20 text-red-400 border-red-500/30">Пропущен</Badge>;
-      case 'active': return <Badge className="bg-blue-500/20 text-blue-400 border-blue-500/30 animate-pulse">Активен</Badge>;
+  useEffect(() => {
+    if (currentUser) {
+      loadUsers();
+      const interval = setInterval(loadUsers, 3000);
+      return () => clearInterval(interval);
     }
-  };
+  }, [currentUser]);
+
+  if (showLogin) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center p-6">
+        <Card className="w-full max-w-md p-8 border-border">
+          <div className="text-center mb-8">
+            <div className="w-16 h-16 gradient-primary rounded-2xl flex items-center justify-center mx-auto mb-4 animate-scale-in">
+              <Icon name="Phone" size={32} className="text-white" />
+            </div>
+            <h1 className="text-3xl font-bold mb-2 animate-fade-in">VoIP Network</h1>
+            <p className="text-muted-foreground animate-fade-in">Войдите для начала звонков</p>
+          </div>
+
+          <div className="space-y-4">
+            <div>
+              <Label>Ваше имя</Label>
+              <Input
+                placeholder="Иван Иванов"
+                value={loginName}
+                onChange={(e) => setLoginName(e.target.value)}
+                className="mt-1.5"
+                onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
+              />
+            </div>
+            <div>
+              <Label>Номер телефона (опционально)</Label>
+              <Input
+                placeholder="+7 (___) ___-__-__"
+                value={loginPhone}
+                onChange={(e) => setLoginPhone(e.target.value)}
+                className="mt-1.5"
+                onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
+              />
+            </div>
+            <Button onClick={handleLogin} className="w-full gradient-primary">
+              <Icon name="LogIn" size={18} className="mr-2" />
+              Войти в сеть
+            </Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background">
+      <audio ref={remoteAudioRef} autoPlay />
+      
       <header className="border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-10">
         <div className="container mx-auto px-6 py-4">
           <div className="flex items-center justify-between">
@@ -76,316 +259,118 @@ export default function Index() {
                 <Icon name="Phone" size={24} className="text-white" />
               </div>
               <div>
-                <h1 className="text-2xl font-bold">VoIP Control</h1>
-                <p className="text-sm text-muted-foreground">Защищённая IP-телефония</p>
+                <h1 className="text-xl font-bold">VoIP Network</h1>
+                <p className="text-sm text-muted-foreground">{currentUser?.name}</p>
               </div>
             </div>
-            <div className="flex items-center gap-4">
-              <Badge className="gradient-primary text-white border-0 px-3 py-1">
-                <Icon name="Shield" size={14} className="mr-1" />
-                Шифрование активно
-              </Badge>
-              <Button size="sm" className="gradient-primary">
-                <Icon name="Settings" size={16} className="mr-2" />
-                Настройки
-              </Button>
-            </div>
+            <Badge className="gradient-primary text-white border-0 px-3 py-1">
+              <div className="w-2 h-2 bg-green-400 rounded-full mr-2 animate-pulse" />
+              Онлайн
+            </Badge>
           </div>
         </div>
       </header>
 
       <main className="container mx-auto px-6 py-8">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-          <Card className="p-6 bg-card border-border relative overflow-hidden group hover:border-primary/50 transition-all duration-300">
-            <div className="absolute inset-0 gradient-primary opacity-5 group-hover:opacity-10 transition-opacity" />
-            <div className="relative">
-              <div className="flex items-center justify-between mb-2">
-                <Icon name="Server" size={24} className="text-primary" />
-                <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse-slow" />
+        {(callState.isInCall || callState.isCalling || callState.isReceivingCall) && (
+          <Card className="mb-8 p-8 border-2 border-primary bg-card/50 backdrop-blur animate-scale-in">
+            <div className="text-center">
+              <div className="w-24 h-24 mx-auto mb-4 rounded-full bg-gradient-to-br from-primary to-secondary flex items-center justify-center animate-pulse-slow">
+                <Icon 
+                  name={callState.isInCall ? "Phone" : callState.isReceivingCall ? "PhoneIncoming" : "PhoneOutgoing"} 
+                  size={48} 
+                  className="text-white" 
+                />
               </div>
-              <p className="text-sm text-muted-foreground mb-1">Статус сервера</p>
-              <p className="text-2xl font-bold">Online</p>
-            </div>
-          </Card>
+              
+              <h2 className="text-2xl font-bold mb-2">{callState.remoteUserName}</h2>
+              
+              {callState.isInCall && (
+                <p className="text-3xl font-mono text-primary mb-6">{formatDuration(callDuration)}</p>
+              )}
+              
+              {callState.isCalling && (
+                <p className="text-muted-foreground mb-6 animate-pulse">Вызов...</p>
+              )}
 
-          <Card className="p-6 bg-card border-border relative overflow-hidden group hover:border-secondary/50 transition-all duration-300">
-            <div className="absolute inset-0 gradient-accent opacity-5 group-hover:opacity-10 transition-opacity" />
-            <div className="relative">
-              <div className="flex items-center justify-between mb-2">
-                <Icon name="Users" size={24} className="text-secondary" />
-                <Badge variant="secondary">{stats.activeUsers}/{stats.totalUsers}</Badge>
-              </div>
-              <p className="text-sm text-muted-foreground mb-1">Активные пользователи</p>
-              <p className="text-2xl font-bold">{stats.activeUsers}</p>
-            </div>
-          </Card>
-
-          <Card className="p-6 bg-card border-border relative overflow-hidden group hover:border-accent/50 transition-all duration-300">
-            <div className="absolute inset-0 bg-accent opacity-5 group-hover:opacity-10 transition-opacity" />
-            <div className="relative">
-              <div className="flex items-center justify-between mb-2">
-                <Icon name="PhoneCall" size={24} className="text-accent" />
-                {stats.activeCalls > 0 && (
-                  <div className="w-3 h-3 bg-accent rounded-full animate-pulse" />
+              <div className="flex items-center justify-center gap-4">
+                {(callState.isInCall || callState.isCalling) && (
+                  <>
+                    <Button 
+                      onClick={toggleMute} 
+                      size="lg" 
+                      variant={isMuted ? "destructive" : "outline"}
+                      className="hover-scale"
+                    >
+                      <Icon name={isMuted ? "MicOff" : "Mic"} size={20} className="mr-2" />
+                      {isMuted ? 'Включить' : 'Выключить'} микрофон
+                    </Button>
+                    <Button onClick={endCall} size="lg" variant="destructive" className="hover-scale">
+                      <Icon name="PhoneOff" size={20} className="mr-2" />
+                      Завершить
+                    </Button>
+                  </>
                 )}
               </div>
-              <p className="text-sm text-muted-foreground mb-1">Активные звонки</p>
-              <p className="text-2xl font-bold">{stats.activeCalls}</p>
             </div>
           </Card>
+        )}
 
-          <Card className="p-6 bg-card border-border relative overflow-hidden group hover:border-primary/50 transition-all duration-300">
-            <div className="absolute inset-0 gradient-primary opacity-5 group-hover:opacity-10 transition-opacity" />
-            <div className="relative">
-              <div className="flex items-center justify-between mb-2">
-                <Icon name="BarChart3" size={24} className="text-primary" />
-              </div>
-              <p className="text-sm text-muted-foreground mb-1">Звонков сегодня</p>
-              <p className="text-2xl font-bold">{stats.todayCalls}</p>
+        <Card className="border-border animate-fade-in">
+          <div className="p-6 border-b border-border flex items-center justify-between">
+            <div>
+              <h2 className="text-xl font-bold mb-1">Активные пользователи</h2>
+              <p className="text-sm text-muted-foreground">Нажмите "Позвонить" для начала звонка</p>
             </div>
-          </Card>
-        </div>
-
-        <Tabs defaultValue="users" className="space-y-6">
-          <TabsList className="bg-card border border-border">
-            <TabsTrigger value="users" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-              <Icon name="Users" size={16} className="mr-2" />
-              Пользователи
-            </TabsTrigger>
-            <TabsTrigger value="calls" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-              <Icon name="Phone" size={16} className="mr-2" />
-              Журнал звонков
-            </TabsTrigger>
-            <TabsTrigger value="analytics" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
-              <Icon name="TrendingUp" size={16} className="mr-2" />
-              Аналитика
-            </TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="users">
-            <Card className="border-border">
-              <div className="p-6 border-b border-border flex items-center justify-between">
-                <div>
-                  <h2 className="text-xl font-bold mb-1">Управление пользователями</h2>
-                  <p className="text-sm text-muted-foreground">Добавляйте и управляйте пользователями системы</p>
+            <Badge variant="secondary" className="px-3 py-1">
+              <Icon name="Users" size={14} className="mr-1" />
+              {users.length} онлайн
+            </Badge>
+          </div>
+          
+          <div className="divide-y divide-border">
+            {users.length === 0 && (
+              <div className="p-12 text-center text-muted-foreground">
+                <Icon name="Users" size={48} className="mx-auto mb-4 opacity-30" />
+                <p>Нет других пользователей онлайн</p>
+                <p className="text-sm mt-2">Откройте сайт в новой вкладке и войдите под другим именем</p>
+              </div>
+            )}
+            
+            {users.map((user) => (
+              <div key={user.id} className="p-6 hover:bg-muted/30 transition-colors">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <div className="relative">
+                      <div className="w-12 h-12 rounded-full bg-gradient-to-br from-primary to-secondary flex items-center justify-center text-white font-semibold text-lg">
+                        {user.name.charAt(0)}
+                      </div>
+                      <div className={`absolute bottom-0 right-0 w-4 h-4 ${getStatusColor(user.status)} rounded-full border-2 border-card animate-pulse`} />
+                    </div>
+                    <div>
+                      <p className="font-semibold text-lg">{user.name}</p>
+                      {user.phone && (
+                        <p className="text-sm text-muted-foreground flex items-center gap-2">
+                          <Icon name="Phone" size={14} />
+                          {user.phone}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  
+                  <Button 
+                    onClick={() => startCall(user)}
+                    disabled={user.status === 'in_call' || callState.isInCall || callState.isCalling || callState.isReceivingCall}
+                    className="gradient-primary hover-scale"
+                  >
+                    <Icon name="Phone" size={16} className="mr-2" />
+                    Позвонить
+                  </Button>
                 </div>
-                <Dialog>
-                  <DialogTrigger asChild>
-                    <Button className="gradient-primary">
-                      <Icon name="UserPlus" size={16} className="mr-2" />
-                      Добавить пользователя
-                    </Button>
-                  </DialogTrigger>
-                  <DialogContent className="bg-card border-border">
-                    <DialogHeader>
-                      <DialogTitle>Новый пользователь</DialogTitle>
-                    </DialogHeader>
-                    <div className="space-y-4 pt-4">
-                      <div>
-                        <Label>Имя пользователя</Label>
-                        <Input placeholder="Иван Иванов" className="mt-1.5" />
-                      </div>
-                      <div>
-                        <Label>Номер телефона</Label>
-                        <Input placeholder="+7 (___) ___-__-__" className="mt-1.5" />
-                      </div>
-                      <div>
-                        <Label>Роль</Label>
-                        <Select>
-                          <SelectTrigger className="mt-1.5">
-                            <SelectValue placeholder="Выберите роль" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="admin">Администратор</SelectItem>
-                            <SelectItem value="user">Пользователь</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <Button className="w-full gradient-primary">
-                        Создать пользователя
-                      </Button>
-                    </div>
-                  </DialogContent>
-                </Dialog>
               </div>
-              <div className="divide-y divide-border">
-                {users.map((user) => (
-                  <div key={user.id} className="p-6 hover:bg-muted/30 transition-colors">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-4">
-                        <div className="relative">
-                          <div className="w-12 h-12 rounded-full bg-gradient-to-br from-primary to-secondary flex items-center justify-center text-white font-semibold">
-                            {user.name.charAt(0)}
-                          </div>
-                          <div className={`absolute bottom-0 right-0 w-4 h-4 ${getStatusColor(user.status)} rounded-full border-2 border-card`} />
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-2 mb-1">
-                            <p className="font-semibold">{user.name}</p>
-                            {user.role === 'admin' && (
-                              <Badge variant="secondary" className="text-xs">
-                                <Icon name="Shield" size={12} className="mr-1" />
-                                Admin
-                              </Badge>
-                            )}
-                          </div>
-                          <p className="text-sm text-muted-foreground flex items-center gap-2">
-                            <Icon name="Phone" size={14} />
-                            {user.phone}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Button variant="outline" size="sm">
-                          <Icon name="Edit" size={14} className="mr-2" />
-                          Изменить
-                        </Button>
-                        <Button variant="outline" size="sm" className="hover:bg-destructive/10 hover:text-destructive hover:border-destructive/30">
-                          <Icon name="Trash2" size={14} />
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="calls">
-            <Card className="border-border">
-              <div className="p-6 border-b border-border">
-                <h2 className="text-xl font-bold mb-1">Журнал звонков</h2>
-                <p className="text-sm text-muted-foreground">История всех звонков в системе</p>
-              </div>
-              <div className="divide-y divide-border">
-                {callLogs.map((call) => (
-                  <div key={call.id} className="p-6 hover:bg-muted/30 transition-colors">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-6 flex-1">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
-                            <Icon name="PhoneOutgoing" size={18} className="text-primary" />
-                          </div>
-                          <div>
-                            <p className="font-medium mb-1">{call.from}</p>
-                            <p className="text-sm text-muted-foreground flex items-center gap-1">
-                              <Icon name="ArrowRight" size={14} />
-                              {call.to}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-6">
-                          <div>
-                            <p className="text-sm text-muted-foreground mb-1">Длительность</p>
-                            <p className="font-semibold">{call.duration}</p>
-                          </div>
-                          <div>
-                            <p className="text-sm text-muted-foreground mb-1">Время</p>
-                            <p className="font-semibold">{call.time}</p>
-                          </div>
-                        </div>
-                      </div>
-                      {getCallStatusBadge(call.status)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="analytics">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <Card className="p-6 border-border">
-                <h3 className="font-bold mb-4 flex items-center gap-2">
-                  <Icon name="TrendingUp" size={20} className="text-primary" />
-                  Статистика звонков за неделю
-                </h3>
-                <div className="space-y-4">
-                  {[
-                    { day: 'Понедельник', calls: 42, duration: '2:14:32' },
-                    { day: 'Вторник', calls: 38, duration: '1:58:16' },
-                    { day: 'Среда', calls: 51, duration: '2:42:08' },
-                    { day: 'Четверг', calls: 47, duration: '2:21:45' },
-                    { day: 'Пятница', calls: 39, duration: '2:05:23' },
-                    { day: 'Суббота', calls: 23, duration: '1:12:56' },
-                    { day: 'Воскресенье', calls: 18, duration: '0:54:12' },
-                  ].map((stat) => (
-                    <div key={stat.day} className="space-y-2">
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="font-medium">{stat.day}</span>
-                        <div className="flex items-center gap-4 text-muted-foreground">
-                          <span>{stat.calls} звонков</span>
-                          <span>{stat.duration}</span>
-                        </div>
-                      </div>
-                      <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
-                        <div
-                          className="h-full gradient-primary rounded-full transition-all duration-500"
-                          style={{ width: `${(stat.calls / 51) * 100}%` }}
-                        />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </Card>
-
-              <Card className="p-6 border-border">
-                <h3 className="font-bold mb-4 flex items-center gap-2">
-                  <Icon name="Activity" size={20} className="text-secondary" />
-                  Производительность системы
-                </h3>
-                <div className="space-y-6">
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm font-medium">Загрузка CPU</span>
-                      <span className="text-sm text-muted-foreground">23%</span>
-                    </div>
-                    <div className="w-full h-3 bg-muted rounded-full overflow-hidden">
-                      <div className="h-full bg-primary rounded-full" style={{ width: '23%' }} />
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm font-medium">Использование памяти</span>
-                      <span className="text-sm text-muted-foreground">1.2 / 4 GB</span>
-                    </div>
-                    <div className="w-full h-3 bg-muted rounded-full overflow-hidden">
-                      <div className="h-full bg-secondary rounded-full" style={{ width: '30%' }} />
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm font-medium">Сетевая нагрузка</span>
-                      <span className="text-sm text-muted-foreground">45 Мбит/с</span>
-                    </div>
-                    <div className="w-full h-3 bg-muted rounded-full overflow-hidden">
-                      <div className="h-full bg-accent rounded-full" style={{ width: '45%' }} />
-                    </div>
-                  </div>
-
-                  <div className="pt-4 border-t border-border space-y-3">
-                    <div className="flex items-center justify-between p-3 rounded-lg bg-green-500/10 border border-green-500/20">
-                      <span className="text-sm font-medium flex items-center gap-2">
-                        <Icon name="CheckCircle" size={16} className="text-green-500" />
-                        Качество связи
-                      </span>
-                      <span className="text-sm font-bold text-green-500">Отлично</span>
-                    </div>
-                    <div className="flex items-center justify-between p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
-                      <span className="text-sm font-medium flex items-center gap-2">
-                        <Icon name="Shield" size={16} className="text-blue-500" />
-                        Шифрование
-                      </span>
-                      <span className="text-sm font-bold text-blue-500">TLS 1.3</span>
-                    </div>
-                  </div>
-                </div>
-              </Card>
-            </div>
-          </TabsContent>
-        </Tabs>
+            ))}
+          </div>
+        </Card>
       </main>
     </div>
   );

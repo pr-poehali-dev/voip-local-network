@@ -1,0 +1,33 @@
+{
+  "tests": [
+    {
+      "name": "Register new user",
+      "method": "POST",
+      "path": "/register",
+      "body": {
+        "username": "testuser",
+        "phone": "+79991234567",
+        "password": "securepass123"
+      },
+      "expectedStatus": 201,
+      "expectedBody": {
+        "user": {
+          "username": "string",
+          "phone": "string"
+        },
+        "token": "string"
+      },
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Get users list",
+      "method": "GET",
+      "path": "/users",
+      "expectedStatus": 200,
+      "expectedBody": {
+        "users": "array"
+      },
+      "bodyMatcher": "partial"
+    }
+  ]
+}
